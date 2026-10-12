@@ -756,8 +756,10 @@ export const makeTelemetryStoreEffect = (db: TelemetryDatabase, opts: TelemetryS
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`)
 
+		// The outer WHERE disambiguates SQLite's INSERT ... SELECT ... ON CONFLICT grammar.
+		// Compare in SQLite so repeated reconciliation does not rewrite unchanged summaries.
 		const upsertTraceSummary = db.query(`
-			INSERT OR REPLACE INTO trace_summaries (
+			INSERT INTO trace_summaries (
 				trace_id, service_name, root_operation_name, started_at_ms, ended_at_ms, active_span_count, duration_ms, span_count, error_count
 			)
 			SELECT trace_id, service_name, root_operation_name, started_at_ms, ended_at_ms, active_span_count, duration_ms, span_count, error_count
@@ -766,6 +768,24 @@ export const makeTelemetryStoreEffect = (db: TelemetryDatabase, opts: TelemetryS
 				WHERE trace_id = ?
 				GROUP BY trace_id
 			)
+			WHERE true
+			ON CONFLICT(trace_id) DO UPDATE SET
+				service_name = excluded.service_name,
+				root_operation_name = excluded.root_operation_name,
+				started_at_ms = excluded.started_at_ms,
+				ended_at_ms = excluded.ended_at_ms,
+				active_span_count = excluded.active_span_count,
+				duration_ms = excluded.duration_ms,
+				span_count = excluded.span_count,
+				error_count = excluded.error_count
+			WHERE trace_summaries.service_name IS NOT excluded.service_name
+				OR trace_summaries.root_operation_name IS NOT excluded.root_operation_name
+				OR trace_summaries.started_at_ms IS NOT excluded.started_at_ms
+				OR trace_summaries.ended_at_ms IS NOT excluded.ended_at_ms
+				OR trace_summaries.active_span_count IS NOT excluded.active_span_count
+				OR trace_summaries.duration_ms IS NOT excluded.duration_ms
+				OR trace_summaries.span_count IS NOT excluded.span_count
+				OR trace_summaries.error_count IS NOT excluded.error_count
 		`)
 
 		const reconcileTraceSummaries = Effect.sync(() => {
@@ -773,7 +793,9 @@ export const makeTelemetryStoreEffect = (db: TelemetryDatabase, opts: TelemetryS
 			const cursor = Number(marker?.value ?? 0)
 			const rows = db.query(`SELECT rowid, trace_id FROM spans WHERE rowid > ? ORDER BY rowid ASC LIMIT ?`).all(cursor, config.otel.retentionTraceBatch) as Array<{ rowid: number; trace_id: string }>
 			if (rows.length === 0) {
-				db.query(`INSERT OR REPLACE INTO motel_maintenance(key, value) VALUES ('trace_summary_cursor', '0')`).run()
+				if (marker?.value !== '0') {
+					db.query(`INSERT OR REPLACE INTO motel_maintenance(key, value) VALUES ('trace_summary_cursor', '0')`).run()
+				}
 				return
 			}
 			const transaction = db.transaction(() => {
