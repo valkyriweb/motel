@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import type { LogItem, TraceSummaryItem } from "./domain.js"
-import { LOG_LIST, LOG_STATS, parseListParams, paginateLogs, paginateSummaries, traceCursorArgs } from "./httpListPolicy.js"
+import { LOG_LIST, LOG_STATS, logCursorArgs, parseListParams, paginateLogs, paginateSummaries, traceCursorArgs } from "./httpListPolicy.js"
 
 const BASE_URL = "http://127.0.0.1:27686"
 
@@ -71,6 +71,30 @@ describe("HTTP list policy", () => {
 
 		expect(page.meta).toMatchObject({ limit: 10, lookback: "2h", returned: 1, truncated: false })
 		expect(page.meta.nextCursor).not.toBeNull()
+	})
+
+	it("uses the last returned log as the continuation point and leaves empty pages without a cursor", () => {
+		const logs: readonly LogItem[] = [1200, 1100, 1000].map((timestamp, index) => ({
+			id: `log-${index + 1}`,
+			timestamp: new Date(timestamp),
+			serviceName: "api",
+			severityText: "INFO",
+			body: "ready",
+			traceId: null,
+			spanId: null,
+			scopeName: null,
+			attributes: {},
+		}))
+
+		const page = paginateLogs(logs, { limit: 2, lookbackMinutes: 60 })
+		const parsed = parseListParams({ url: `/api/logs?cursor=${page.meta.nextCursor}` }, LOG_LIST, BASE_URL)
+		expect(page.data.map((log) => log.id)).toEqual(["log-1", "log-2"])
+		expect(page.meta).toMatchObject({ returned: 2, truncated: true })
+		expect(logCursorArgs(parsed.cursor)).toEqual({ cursorTimestampMs: 1100, cursorId: "log-2" })
+
+		const empty = paginateLogs([], { limit: 2, lookbackMinutes: 60 })
+		expect(empty.data).toEqual([])
+		expect(empty.meta).toMatchObject({ returned: 0, truncated: false, nextCursor: null })
 	})
 
 	it("keeps aggregate log queries bounded to twenty groups by default", () => {
